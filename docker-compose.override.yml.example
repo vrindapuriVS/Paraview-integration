@@ -1,0 +1,14 @@
+# Example override file - copy to docker-compose.override.yml to use
+# This allows you to override settings without modifying docker-compose.yml
+# Docker Compose automatically uses docker-compose.override.yml if it exists
+
+version: '3.8'
+
+services:
+  frontend-dev:
+    volumes:
+      - .:/app
+      - /app/node_modules
+    # Uncomment to enable hot reload
+    # environment:
+    #   - CHOKIDAR_USEPOLLING=true

@@ -1,0 +1,22 @@
+# Environment and secrets (never commit)
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+.vite/
+
+# Logs and cache
+*.log
+.cache/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db

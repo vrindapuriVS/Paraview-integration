@@ -1,0 +1,27 @@
+version: '3.8'
+
+services:
+  # Production service
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:80"
+    container_name: vortex-ai-frontend
+    restart: unless-stopped
+
+  # Development service
+  frontend-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    ports:
+      - "5173:5173"
+    container_name: vortex-ai-frontend-dev
+    volumes:
+      - .:/app
+      - /app/node_modules
+    environment:
+      - NODE_ENV=development
+    restart: unless-stopped
