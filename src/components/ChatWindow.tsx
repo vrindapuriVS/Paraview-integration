@@ -1254,6 +1254,7 @@ export default function ChatWindow() {
                       activeFlowMessageId === message.id &&
                       activeFlowStep !== null &&
                       activeFlowStep !== "geometry";
+                    const showVtuPreview = !hideGeometryPreview;
                     return (
                       <>
                   {message.stlPreview && (
@@ -1279,11 +1280,8 @@ export default function ChatWindow() {
                     ) : null
                   )}
                   {message.vtuPreview && (
-                    message.viewerType === "vtu" ? (
-                      <div
-                        className="stl-preview-in-chat"
-                        style={hideGeometryPreview ? { display: "none" } : undefined}
-                      >
+                    message.viewerType === "vtu" && showVtuPreview ? (
+                      <div className="stl-preview-in-chat">
                         <VtuPreview
                           fileName={message.vtuPreview.fileName}
                           vtuUrl={message.vtuPreview.vtuUrl}

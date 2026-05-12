@@ -11,3 +11,17 @@ declare module "@kitware/vtk.js/IO/XML/XMLUnstructuredGridReader" {
 
   export default vtkXMLUnstructuredGridReader;
 }
+
+declare module "../vtk/XMLUnstructuredGridReader" {
+  type VtkReader = {
+    parseAsArrayBuffer: (buffer: ArrayBuffer) => void;
+    getOutputData: (index?: number) => any;
+    delete?: () => void;
+  };
+
+  const vtkXMLUnstructuredGridReader: {
+    newInstance: () => VtkReader;
+  };
+
+  export default vtkXMLUnstructuredGridReader;
+}

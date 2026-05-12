@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import "@kitware/vtk.js/Rendering/Profiles/Geometry";
-import vtkXMLUnstructuredGridReader from "@kitware/vtk.js/IO/XML/XMLUnstructuredGridReader";
+import vtkXMLUnstructuredGridReader from "../vtk/XMLUnstructuredGridReader";
 import vtkActor from "@kitware/vtk.js/Rendering/Core/Actor.js";
 import vtkMapper from "@kitware/vtk.js/Rendering/Core/Mapper.js";
 import vtkScalarBarActor from "@kitware/vtk.js/Rendering/Core/ScalarBarActor.js";
@@ -12,7 +12,7 @@ import vtkDataArray from "@kitware/vtk.js/Common/Core/DataArray.js";
 import vtkPolyData from "@kitware/vtk.js/Common/DataModel/PolyData.js";
 import vtkPointPicker from "@kitware/vtk.js/Rendering/Core/PointPicker.js";
 import vtkCellPicker from "@kitware/vtk.js/Rendering/Core/CellPicker.js";
-import vtkDataSetSurfaceFilter from "@kitware/vtk.js/Filters/Geometry/DataSetSurfaceFilter";
+import vtkDataSetSurfaceFilter from "../vtk/DataSetSurfaceFilter";
 import { useAppLayout } from "../context/AppLayoutContext";
 import {
   viewerMiniBtn,
