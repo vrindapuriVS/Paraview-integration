@@ -20,12 +20,17 @@ import { buildSurfaceContourGeometry } from "../filters/contourSurface";
 import { buildStreamlineGeometry, type StreamlineOptions } from "../filters/streamlines";
 import { buildVelocityGlyphMesh, type GlyphOptions } from "../filters/glyphs";
 import "./StlPreview.tailwind.css";
+import { useAppLayout } from "../context/AppLayoutContext";
+import { GeometryResultsNextFab, type GeometryResultsNav } from "./VtuPreview";
+import { viewerToolbarBtn, viewerToolbarBtnActive } from "./viewerToolbarClasses";
 
 export type StlPreviewProps = {
   caseId?: string;
   fileName: string;
   file?: File | null;
   analysisLoading?: boolean;
+  /** Always-on footer: where “next” (CL) lives after geometry */
+  geometryResultsNav?: GeometryResultsNav;
 };
 
 type DisplayRepresentation = "surfaceEdges" | "surface" | "wireframe";
@@ -67,6 +72,7 @@ type SceneBridge = {
   addDerivedField: (field: ScalarField) => void;
   getScalarFields: () => ScalarField[];
   setInteractionEnabled: (on: boolean) => void;
+  setRenderPaused: (paused: boolean) => void;
   resize: () => void;
 };
 
@@ -325,7 +331,9 @@ export default function StlPreview({
   fileName,
   file,
   analysisLoading = false,
+  geometryResultsNav,
 }: StlPreviewProps) {
+  const { hideSidebar } = useAppLayout();
   const wrapRef = useRef<HTMLDivElement>(null);
   const bridgeRef = useRef<SceneBridge | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -396,6 +404,7 @@ export default function StlPreview({
 
   useEffect(() => {
     bridgeRef.current?.setInteractionEnabled(!busy);
+    bridgeRef.current?.setRenderPaused(busy);
   }, [busy]);
 
   useEffect(() => {
@@ -1161,6 +1170,46 @@ export default function StlPreview({
           orientationRenderer.setSize(widgetSize, widgetSize, false);
         };
 
+        let renderPaused = false;
+
+        const renderFrame = () => {
+          headLight.position.copy(camera.position);
+          headLight.target.position.set(0, 0, 0);
+          headLight.target.updateMatrixWorld();
+          controls.update();
+          orientationTriad.group.quaternion.copy(camera.quaternion).invert();
+          orientationTriad.labels.forEach((label) => {
+            label.quaternion.copy(orientationCamera.quaternion);
+          });
+          renderer.render(scene, camera);
+          orientationRenderer.clear();
+          orientationRenderer.render(orientationScene, orientationCamera);
+        };
+
+        const loop = () => {
+          if (renderPaused || disposed) {
+            animId = 0;
+            return;
+          }
+          animId = requestAnimationFrame(loop);
+          renderFrame();
+        };
+
+        const setRenderPaused = (paused: boolean) => {
+          renderPaused = paused;
+          if (paused) {
+            if (animId) {
+              cancelAnimationFrame(animId);
+              animId = 0;
+            }
+            renderFrame();
+            return;
+          }
+          if (!animId) {
+            loop();
+          }
+        };
+
         bridgeRef.current = {
           resetView: () => {
             camera.position.copy(homeCam);
@@ -1300,24 +1349,14 @@ export default function StlPreview({
           setInteractionEnabled: (on: boolean) => {
             controls.enabled = on;
           },
+          setRenderPaused,
           resize: resizeViewport,
         };
 
-        const loop = () => {
-          animId = requestAnimationFrame(loop);
-          headLight.position.copy(camera.position);
-          headLight.target.position.set(0, 0, 0);
-          headLight.target.updateMatrixWorld();
-          controls.update();
-          orientationTriad.group.quaternion.copy(camera.quaternion).invert();
-          orientationTriad.labels.forEach((label) => {
-            label.quaternion.copy(orientationCamera.quaternion);
-          });
-          renderer.render(scene, camera);
-          orientationRenderer.clear();
-          orientationRenderer.render(orientationScene, orientationCamera);
-        };
-        loop();
+        setRenderPaused(analysisLoading);
+        if (!analysisLoading) {
+          loop();
+        }
         resizeViewport();
 
         const ro = new ResizeObserver(() => {
@@ -1514,12 +1553,13 @@ export default function StlPreview({
 
   const statusLabel = error ? "Error" : loading ? "Loading" : "Loaded";
 
-  const btnBase =
-    "rounded-md border border-slate-600/90 bg-slate-800/80 px-2.5 py-1 text-xs font-medium text-slate-200 transition hover:bg-slate-700/90 hover:border-slate-500 disabled:cursor-not-allowed disabled:opacity-40";
-  const btnActive = "border-sky-500/70 bg-sky-950/60 text-sky-100";
+  const btnBase = viewerToolbarBtn;
+  const btnActive = viewerToolbarBtnActive;
 
   return (
-    <div className="fixed inset-y-0 right-0 left-0 z-[12000] flex max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-[#13171c] lg:left-[var(--sidebar-width)]">
+    <div
+      className={`fixed inset-y-0 right-0 left-0 z-[12000] flex max-h-[100dvh] min-h-0 min-w-0 flex-col overflow-hidden bg-[#13171c] ${hideSidebar ? "" : "lg:left-[var(--sidebar-width)]"}`}
+    >
       <div className="flex shrink-0 flex-col gap-3 border-b border-slate-800 bg-[#0a0d12] px-4 py-3">
         <div className="flex flex-wrap items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
@@ -1541,6 +1581,11 @@ export default function StlPreview({
           >
             {statusLabel}
           </span>
+          {geometryResultsNav?.onExit && (
+            <button type="button" className={btnBase} disabled={busy} onClick={geometryResultsNav.onExit}>
+              Exit
+            </button>
+          )}
           {!error && !loading && (
             <span className="shrink-0 rounded-full bg-slate-900/70 px-2.5 py-0.5 text-[11px] font-medium uppercase tracking-wide text-slate-200 ring-1 ring-slate-700/80">
               Plane: {geometryPlane.label}
@@ -2338,6 +2383,10 @@ export default function StlPreview({
           <div className="h-10 w-10 animate-spin rounded-full border-2 border-slate-600 border-t-slate-200" />
           <p className="text-sm font-medium tracking-wide text-slate-200">Loading STL...</p>
         </div>
+
+        {geometryResultsNav && !error && (
+          <GeometryResultsNextFab nav={geometryResultsNav} viewerBusy={busy || isLoading} />
+        )}
       </div>
     </div>
   );

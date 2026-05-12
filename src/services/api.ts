@@ -27,7 +27,7 @@ async function apiFetch(url: string, options?: RequestInit): Promise<Response> {
     if (msg === 'Failed to fetch' || msg.includes('NetworkError') || msg.includes('Load failed')) {
       const base = API_BASE_URL.replace(/\/api\/v1\/?$/, '');
       throw new Error(
-        `Backend at ${base} is not reachable. Start it with: cd ResearchPlatform1\\ResearchPlatform\\backend && python -m uvicorn app.main:app --reload --port 8000. Then check http://localhost:8000/health`
+        `Backend at ${base} is not reachable. Start the ResearchPlatform backend (the backend folder in your ResearchPlatform repo — not UQ_AI/backend): cd ResearchPlatform1\\ResearchPlatform\\backend && python -m uvicorn app.main:app --reload --port 8000. Then open http://localhost:8000/health`
       );
     }
     throw err;
@@ -136,6 +136,7 @@ export interface FoamLoadResult {
   output_format: "vtu" | "json";
   filename?: string;
   vtu_base64?: string;
+  dataset_id?: string;
   dataset?: any;
   metadata: Record<string, any>;
   warnings?: string[];
@@ -723,6 +724,10 @@ export const foamApi = {
       const fd = new FormData();
       fd.append("file", file);
       fd.append("output_format", outputFormat);
+      // VTU + coefficient metadata in JSON body (readable cross-origin); binary VTU would hide X-OpenFOAM-* headers from JS.
+      if (outputFormat === "vtu") {
+        fd.append("vtu_packaging", "json");
+      }
       return fd;
     };
 
@@ -757,6 +762,14 @@ export const foamApi = {
         output_format: fmt,
         filename: nested?.filename || nested?.file_name || nested?.name || undefined,
         vtu_base64: guessedB64 || undefined,
+        dataset_id:
+          nested?.dataset_id ||
+          nested?.datasetId ||
+          payload?.dataset_id ||
+          payload?.datasetId ||
+          nested?.id ||
+          payload?.id ||
+          undefined,
         dataset: nested?.dataset || nested?.mesh || undefined,
         metadata: (nested?.metadata && typeof nested.metadata === "object" ? nested.metadata : {}) as Record<string, any>,
         warnings: Array.isArray(nested?.warnings) ? nested.warnings : [],
@@ -806,14 +819,33 @@ export const foamApi = {
         const bytes = new Uint8Array(buf);
         let binary = "";
         for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+
+        let metadata: Record<string, unknown> = {};
+        try {
+          const metaHdr = response.headers.get("X-OpenFOAM-Metadata");
+          if (metaHdr) metadata = JSON.parse(metaHdr) as Record<string, unknown>;
+        } catch {
+          metadata = {};
+        }
+        let warnings: string[] = [];
+        try {
+          const wHdr = response.headers.get("X-OpenFOAM-Warnings");
+          if (wHdr) {
+            const parsed = JSON.parse(wHdr);
+            if (Array.isArray(parsed)) warnings = parsed as string[];
+          }
+        } catch {
+          warnings = [];
+        }
+
         return {
           status: response.status,
           data: {
             output_format: "vtu",
             filename: "openfoam_processed.vtu",
             vtu_base64: btoa(binary),
-            metadata: {},
-            warnings: [],
+            metadata,
+            warnings,
           },
         };
       }
@@ -843,6 +875,35 @@ export const foamApi = {
       lastResult ?? {
         status: 404,
         error: "OpenFOAM loader endpoint not found on backend.",
+      }
+    );
+  },
+
+  async getPlotData(datasetId: string): Promise<ApiResponse<any>> {
+    const rootBase = API_BASE_URL.replace(/\/api\/v1\/?$/, "");
+    const encodedId = encodeURIComponent(datasetId);
+    const candidates = [
+      `${API_BASE_URL}/load-foam/${encodedId}/plot-data`,
+      `${API_BASE_URL}/foam/load-foam/${encodedId}/plot-data`,
+      `${rootBase}/load-foam/${encodedId}/plot-data`,
+    ];
+
+    let lastResult: ApiResponse<any> | null = null;
+    for (const url of candidates) {
+      const response = await apiFetch(url, {
+        headers: getAuthHeaders(),
+      });
+      const result = await handleResponse<any>(response);
+      if (result.status !== 404) {
+        return result;
+      }
+      lastResult = result;
+    }
+
+    return (
+      lastResult ?? {
+        status: 404,
+        error: "OpenFOAM plot-data endpoint not found on backend.",
       }
     );
   },

@@ -1,11 +1,13 @@
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import { createPortal } from "react-dom";
 import ChatInput from "./ChatInput";
 import MessageBubble from "./MessageBubble";
 import ThinkingSpinner from "./ThinkingSpinner";
+import AnalysisResultsWizard from "./AnalysisResultsWizard";
 import StlPreview from "./StlPreview";
 import VtuPreview from "./VtuPreview";
 import UQChart from "./UQChart";
+import { useAppLayout, type AnalysisFlowStep } from "../context/AppLayoutContext";
 import { sessionsApi, casesApi, jobsApi, llmApi, resultsApi, foamApi } from "../services/api";
 
 type Message = {
@@ -26,15 +28,248 @@ type AnalysisResult = {
     cd: Array<{ AOA: number; Mean: number; UQ: number }>;
     cl: Array<{ AOA: number; Mean: number; UQ: number }>;
   } | null;
+  residuals?: {
+    xLabel: string;
+    yLabel: string;
+    source?: string;
+    series: Array<{
+      key: string;
+      label: string;
+      values: number[];
+    }>;
+  } | null;
   summary?: string;
   error?: string;
 };
+
+type ChartRow = NonNullable<AnalysisResult["charts"]>["cl"][number];
+type ChartBundle = NonNullable<AnalysisResult["charts"]>;
 
 const STEPS = [
   "Setting up the simulation",
   "Running CFD simulation",
   "Running Uncertainty Quantification",
 ];
+
+const EMPTY_COEFF_CHARTS: ChartBundle = { cl: [], cd: [] };
+
+const toFiniteNumber = (value: unknown): number | null => {
+  const num =
+    typeof value === "number" ? value : typeof value === "string" ? Number(value) : Number.NaN;
+  return Number.isFinite(num) ? num : null;
+};
+
+const normalizeChartRow = (row: unknown): ChartRow | null => {
+  if (!row || typeof row !== "object") return null;
+  const source = row as Record<string, unknown>;
+  const aoa =
+    toFiniteNumber(source.AOA) ??
+    toFiniteNumber(source.aoa) ??
+    toFiniteNumber(source.alpha) ??
+    toFiniteNumber(source.angle_of_attack) ??
+    toFiniteNumber(source.time) ??
+    toFiniteNumber(source.x);
+  const mean =
+    toFiniteNumber(source.Mean) ??
+    toFiniteNumber(source.mean) ??
+    toFiniteNumber(source.value) ??
+    toFiniteNumber(source.y) ??
+    toFiniteNumber(source.coefficient);
+  if (aoa === null || mean === null) return null;
+
+  const uqDirect =
+    toFiniteNumber(source.UQ) ??
+    toFiniteNumber(source.uq) ??
+    toFiniteNumber(source.uncertainty) ??
+    toFiniteNumber(source.std) ??
+    toFiniteNumber(source.stddev);
+  const lower =
+    toFiniteNumber(source.LowerBound) ??
+    toFiniteNumber(source.lower_bound) ??
+    toFiniteNumber(source.lower) ??
+    toFiniteNumber(source.ci_lower);
+  const upper =
+    toFiniteNumber(source.UpperBound) ??
+    toFiniteNumber(source.upper_bound) ??
+    toFiniteNumber(source.upper) ??
+    toFiniteNumber(source.ci_upper);
+  const uq =
+    uqDirect ??
+    (lower !== null && upper !== null
+      ? Math.max(Math.abs(mean - lower), Math.abs(upper - mean))
+      : lower !== null
+        ? Math.abs(mean - lower)
+        : upper !== null
+          ? Math.abs(upper - mean)
+          : 0);
+
+  return { AOA: aoa, Mean: mean, UQ: uq };
+};
+
+const normalizeChartSeries = (series: unknown): ChartRow[] => {
+  if (Array.isArray(series)) {
+    return series
+      .map((row) => normalizeChartRow(row))
+      .filter((row): row is ChartRow => row !== null)
+      .sort((a, b) => a.AOA - b.AOA);
+  }
+
+  if (series && typeof series === "object") {
+    const source = series as Record<string, unknown>;
+    if (Array.isArray(source.aoa) && Array.isArray(source.mean)) {
+      const aoaValues = source.aoa;
+      const meanValues = source.mean;
+      const lowerValues = Array.isArray(source.ci_lower) ? source.ci_lower : [];
+      const upperValues = Array.isArray(source.ci_upper) ? source.ci_upper : [];
+      const uqValues = Array.isArray(source.uq) ? source.uq : [];
+      const rows: ChartRow[] = [];
+
+      for (let i = 0; i < Math.min(aoaValues.length, meanValues.length); i += 1) {
+        const aoa = toFiniteNumber(aoaValues[i]);
+        const mean = toFiniteNumber(meanValues[i]);
+        if (aoa === null || mean === null) continue;
+        const uq =
+          toFiniteNumber(uqValues[i]) ??
+          (() => {
+            const lower = toFiniteNumber(lowerValues[i]);
+            const upper = toFiniteNumber(upperValues[i]);
+            if (lower !== null && upper !== null) {
+              return Math.max(Math.abs(mean - lower), Math.abs(upper - mean));
+            }
+            if (lower !== null) return Math.abs(mean - lower);
+            if (upper !== null) return Math.abs(upper - mean);
+            return 0;
+          })();
+        rows.push({ AOA: aoa, Mean: mean, UQ: uq });
+      }
+
+      return rows.sort((a, b) => a.AOA - b.AOA);
+    }
+  }
+
+  return [];
+};
+
+const mergeChartBundles = (
+  base: ChartBundle,
+  extra: Partial<ChartBundle> | null | undefined
+): ChartBundle => ({
+  cl: base.cl.length ? base.cl : Array.isArray(extra?.cl) ? extra.cl : [],
+  cd: base.cd.length ? base.cd : Array.isArray(extra?.cd) ? extra.cd : [],
+});
+
+const extractChartsFromPayload = (payload: unknown): ChartBundle => {
+  if (!payload || typeof payload !== "object") return EMPTY_COEFF_CHARTS;
+
+  const source = payload as Record<string, unknown>;
+  let charts: ChartBundle = {
+    cl: normalizeChartSeries(source.cl ?? source.lift ?? source.lift_coefficient ?? source.cl_values),
+    cd: normalizeChartSeries(source.cd ?? source.drag ?? source.drag_coefficient ?? source.cd_values),
+  };
+
+  if ((!charts.cl.length || !charts.cd.length) && Array.isArray(source.data)) {
+    const clRows: ChartRow[] = [];
+    const cdRows: ChartRow[] = [];
+    for (const row of source.data) {
+      if (!row || typeof row !== "object") continue;
+      const sourceRow = row as Record<string, unknown>;
+      const aoa =
+        toFiniteNumber(sourceRow.AOA) ??
+        toFiniteNumber(sourceRow.aoa) ??
+        toFiniteNumber(sourceRow.alpha) ??
+        toFiniteNumber(sourceRow.angle_of_attack) ??
+        toFiniteNumber(sourceRow.time) ??
+        toFiniteNumber(sourceRow.x);
+      if (aoa === null) continue;
+
+      const clMean =
+        toFiniteNumber(sourceRow.cl_mean) ??
+        toFiniteNumber(sourceRow.cl) ??
+        toFiniteNumber(sourceRow.lift) ??
+        toFiniteNumber(sourceRow.lift_coefficient);
+      const cdMean =
+        toFiniteNumber(sourceRow.cd_mean) ??
+        toFiniteNumber(sourceRow.cd) ??
+        toFiniteNumber(sourceRow.drag) ??
+        toFiniteNumber(sourceRow.drag_coefficient);
+
+      if (clMean !== null) {
+        clRows.push({
+          AOA: aoa,
+          Mean: clMean,
+          UQ:
+            toFiniteNumber(sourceRow.cl_uq) ??
+            toFiniteNumber(sourceRow.cl_ci) ??
+            toFiniteNumber(sourceRow.cl_uncertainty) ??
+            0,
+        });
+      }
+      if (cdMean !== null) {
+        cdRows.push({
+          AOA: aoa,
+          Mean: cdMean,
+          UQ:
+            toFiniteNumber(sourceRow.cd_uq) ??
+            toFiniteNumber(sourceRow.cd_ci) ??
+            toFiniteNumber(sourceRow.cd_uncertainty) ??
+            0,
+        });
+      }
+    }
+
+    charts = mergeChartBundles(charts, {
+      cl: clRows.sort((a, b) => a.AOA - b.AOA),
+      cd: cdRows.sort((a, b) => a.AOA - b.AOA),
+    });
+  }
+
+  return charts;
+};
+
+const extractResidualDataFromPayload = (
+  payload: unknown
+): NonNullable<AnalysisResult["residuals"]> | null => {
+  if (!payload || typeof payload !== "object") return null;
+  const source = payload as Record<string, unknown>;
+  const seriesPayload = Array.isArray(source.series) ? source.series : [];
+  const series = seriesPayload
+    .map((entry) => {
+      if (!entry || typeof entry !== "object") return null;
+      const row = entry as Record<string, unknown>;
+      const key = typeof row.key === "string" && row.key.trim() ? row.key.trim() : null;
+      const label =
+        typeof row.label === "string" && row.label.trim()
+          ? row.label.trim()
+          : key;
+      const values = Array.isArray(row.values)
+        ? row.values
+            .map((value) => toFiniteNumber(value))
+            .filter((value): value is number => value !== null)
+        : [];
+      if (!key || !label || !values.length) return null;
+      return { key, label, values };
+    })
+    .filter(
+      (
+        entry
+      ): entry is NonNullable<AnalysisResult["residuals"]>["series"][number] => entry !== null
+    );
+
+  if (!series.length) return null;
+
+  return {
+    xLabel:
+      typeof source.x_label === "string" && source.x_label.trim()
+        ? source.x_label
+        : "Iteration",
+    yLabel:
+      typeof source.y_label === "string" && source.y_label.trim()
+        ? source.y_label
+        : "Residual",
+    source: typeof source.source === "string" ? source.source : undefined,
+    series,
+  };
+};
 
 const STEP_DURATIONS_MS = [10000, 20000, 5000];
 const TYPING_INTERVAL_MS = 12;
@@ -140,10 +375,13 @@ const StreamingSummary = ({ summary }: { summary: string }) => {
 };
 
 export default function ChatWindow() {
+  const { setAnalysisFlow } = useAppLayout();
   const [messages, setMessages] = useState<Message[]>([]);
   const [thinking, setThinking] = useState(false);
   const [statusMessageIndex, setStatusMessageIndex] = useState(0);
   const [pipelineComplete, setPipelineComplete] = useState(false);
+  const [activeFlowMessageId, setActiveFlowMessageId] = useState<number | null>(null);
+  const [activeFlowStep, setActiveFlowStep] = useState<AnalysisFlowStep | null>(null);
   const messageIdRef = useRef(0);
 
   const statusMessages = [
@@ -151,6 +389,58 @@ export default function ChatWindow() {
     "Running CFD simulation",
     "Running Uncertainty Quantification"
   ];
+
+  const closeAnalysisFlow = useCallback(() => {
+    setActiveFlowMessageId(null);
+    setActiveFlowStep(null);
+  }, []);
+
+  const handleFlowStepSelect = useCallback((step: AnalysisFlowStep) => {
+    setActiveFlowStep(step);
+  }, []);
+
+  const activeFlowMessage = useMemo(
+    () =>
+      activeFlowMessageId === null
+        ? null
+        : messages.find((message) => message.id === activeFlowMessageId && message.role === "user") ?? null,
+    [messages, activeFlowMessageId]
+  );
+
+  useEffect(() => {
+    if (activeFlowMessageId !== null && !activeFlowMessage) {
+      closeAnalysisFlow();
+    }
+  }, [activeFlowMessageId, activeFlowMessage, closeAnalysisFlow]);
+
+  const sidebarAnalysisFlow = useMemo(() => {
+    if (activeFlowMessageId === null || activeFlowStep === null) {
+      return null;
+    }
+    return {
+      currentStep: activeFlowStep,
+      onSelectStep: handleFlowStepSelect,
+      onExit: closeAnalysisFlow,
+    };
+  }, [activeFlowMessageId, activeFlowStep, handleFlowStepSelect, closeAnalysisFlow]);
+
+  useEffect(() => {
+    setAnalysisFlow(sidebarAnalysisFlow);
+    return () => setAnalysisFlow(null);
+  }, [sidebarAnalysisFlow, setAnalysisFlow]);
+
+  const activeGeometryResultsNav = useMemo(() => {
+    if (activeFlowMessageId === null) {
+      return undefined;
+    }
+    return {
+      chartsReady: true,
+      pipelineBusy: thinking,
+      resultsWizardOpen: activeFlowStep !== null && activeFlowStep !== "geometry",
+      onContinueToCL: () => setActiveFlowStep("cl"),
+      onExit: closeAnalysisFlow,
+    };
+  }, [activeFlowMessageId, thinking, activeFlowStep, closeAnalysisFlow]);
 
   // Cycle through status messages while backend processes
   useEffect(() => {
@@ -346,7 +636,6 @@ export default function ChatWindow() {
           // Try to extract CD and CL arrays from various possible formats
           let cd: any[] = [];
           let cl: any[] = [];
-          
           // Format 1: { cd: [...], cl: [...] }
           if (plotData.cd && Array.isArray(plotData.cd) && plotData.cl && Array.isArray(plotData.cl)) {
             cd = plotData.cd;
@@ -686,6 +975,11 @@ export default function ChatWindow() {
       },
     ]);
 
+    if (isLocalPreviewFile) {
+      setActiveFlowMessageId(messageId);
+      setActiveFlowStep("geometry");
+    }
+
     setThinking(true);
     setStatusMessageIndex(0);
 
@@ -729,6 +1023,43 @@ export default function ChatWindow() {
           const vtuFile = new File([bytes], outName, { type: "application/octet-stream" });
           const vtuUrl = URL.createObjectURL(vtuFile);
 
+          const inlineCoefficientCharts = extractChartsFromPayload(
+            foamRes.data?.metadata?.coefficient_charts
+          );
+          const inlinePlotDataCharts = extractChartsFromPayload(
+            foamRes.data?.metadata?.plot_data
+          );
+          const residualPlotData = extractResidualDataFromPayload(
+            foamRes.data?.metadata?.residual_plot_data
+          );
+          let mergedCharts = mergeChartBundles(
+            inlineCoefficientCharts,
+            inlinePlotDataCharts
+          );
+
+          const datasetId = String(
+            foamRes.data?.dataset_id ??
+              foamRes.data?.metadata?.dataset_id ??
+              foamRes.data?.metadata?.datasetId ??
+              ""
+          ).trim();
+
+          if ((!mergedCharts.cl.length || !mergedCharts.cd.length) && datasetId) {
+            try {
+              const plotDataRes = await foamApi.getPlotData(datasetId);
+              if (!plotDataRes.error && plotDataRes.data) {
+                mergedCharts = mergeChartBundles(
+                  mergedCharts,
+                  extractChartsFromPayload(plotDataRes.data)
+                );
+              }
+            } catch (plotDataError) {
+              console.warn("Could not load OpenFOAM plot-data for preview:", plotDataError);
+            }
+          }
+
+          const hasCoeffRows = mergedCharts.cl.length > 0 || mergedCharts.cd.length > 0;
+
           setMessages((prev) =>
             prev.map((m) =>
               m.id === messageId
@@ -740,10 +1071,20 @@ export default function ChatWindow() {
                       vtuUrl,
                     },
                     stlPreview: undefined,
+                    analysis: {
+                      progressStep: STEPS.length,
+                      charts: mergedCharts,
+                      residuals: residualPlotData,
+                      summary: hasCoeffRows
+                        ? "Lift (CL) and drag (CD) preview data was loaded from your uploaded case or backend plot metadata. If uncertainty bands were missing, synthetic UQ values were used so the graphs still render."
+                        : "No CL/CD series was found in this archive or backend plot metadata. Add postProcessing/forceCoeffs coefficient*.dat, CL/CD CSVs, or backend plot_data so the graphs can render.",
+                    },
                   }
                 : m
             )
           );
+          setActiveFlowMessageId(messageId);
+          setActiveFlowStep("geometry");
           const foamWarnings = foamRes.data?.warnings;
           if (foamWarnings?.length) {
             setMessages((prev) => [
@@ -793,6 +1134,8 @@ export default function ChatWindow() {
               : m
           )
         );
+        setActiveFlowMessageId(messageId);
+        setActiveFlowStep("geometry");
       } catch (err) {
         const msg = err instanceof Error ? err.message : "Unknown error";
         setMessages((prev) =>
@@ -906,37 +1249,54 @@ export default function ChatWindow() {
                   className="message-stack"
                 >
                   <MessageBubble role="user" text={message.text} />
+                  {(() => {
+                    const hideGeometryPreview =
+                      activeFlowMessageId === message.id &&
+                      activeFlowStep !== null &&
+                      activeFlowStep !== "geometry";
+                    return (
+                      <>
                   {message.stlPreview && (
                     message.viewerType === "stl" ? (
-                      <div className="stl-preview-in-chat">
-                        {(() => {
-                          console.log("Active viewer:", message.viewerType);
-                          return (
-                            <StlPreview
-                              caseId={message.stlPreview.caseId}
-                              fileName={message.stlPreview.fileName}
-                              file={message.stlPreview.file}
-                            />
-                          );
-                        })()}
+                      <div
+                        className="stl-preview-in-chat"
+                        style={hideGeometryPreview ? { display: "none" } : undefined}
+                      >
+                        <StlPreview
+                          caseId={message.stlPreview.caseId}
+                          fileName={message.stlPreview.fileName}
+                          file={message.stlPreview.file}
+                          analysisLoading={
+                            activeFlowMessageId === message.id &&
+                            activeFlowStep !== null &&
+                            activeFlowStep !== "geometry"
+                          }
+                          geometryResultsNav={
+                            activeFlowMessageId === message.id ? activeGeometryResultsNav : undefined
+                          }
+                        />
                       </div>
                     ) : null
                   )}
                   {message.vtuPreview && (
                     message.viewerType === "vtu" ? (
-                      <div className="stl-preview-in-chat">
-                        {(() => {
-                          console.log("Active viewer:", message.viewerType);
-                          return (
-                            <VtuPreview
-                              fileName={message.vtuPreview.fileName}
-                              vtuUrl={message.vtuPreview.vtuUrl}
-                            />
-                          );
-                        })()}
+                      <div
+                        className="stl-preview-in-chat"
+                        style={hideGeometryPreview ? { display: "none" } : undefined}
+                      >
+                        <VtuPreview
+                          fileName={message.vtuPreview.fileName}
+                          vtuUrl={message.vtuPreview.vtuUrl}
+                          geometryResultsNav={
+                            activeFlowMessageId === message.id ? activeGeometryResultsNav : undefined
+                          }
+                        />
                       </div>
                     ) : null
                   )}
+                      </>
+                    );
+                  })()}
                   {thinking && index === arr.length - 1 && !message.analysis && (
                     <div className="message-status">
                       <div
@@ -1006,6 +1366,18 @@ export default function ChatWindow() {
               ))}
           </div>
         </div>
+      )}
+
+      {activeFlowMessage && activeFlowStep && activeFlowStep !== "geometry" && (
+        <AnalysisResultsWizard
+          step={activeFlowStep}
+          clData={activeFlowMessage.analysis?.charts?.cl ?? []}
+          cdData={activeFlowMessage.analysis?.charts?.cd ?? []}
+          residualData={activeFlowMessage.analysis?.residuals ?? null}
+          onStepChange={handleFlowStepSelect}
+          onBackToGeometry={() => setActiveFlowStep("geometry")}
+          onExit={closeAnalysisFlow}
+        />
       )}
 
       {/* Chat input via portal - fixed at viewport bottom, escapes parent transform */}

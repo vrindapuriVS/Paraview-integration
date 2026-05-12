@@ -1,44 +1,80 @@
 import { useEffect, useRef, useState } from "react";
 
-export default function InteractiveBackground() {
-  const backgroundRef = useRef<HTMLDivElement>(null);
+type InteractiveBackgroundProps = {
+  interactive?: boolean;
+};
+
+export default function InteractiveBackground({
+  interactive = true,
+}: InteractiveBackgroundProps) {
   const [mousePos, setMousePos] = useState({ x: 50, y: 50 });
   const [isHovering, setIsHovering] = useState(false);
+  const pendingMousePosRef = useRef({ x: 50, y: 50 });
+  const frameRef = useRef<number | null>(null);
 
   useEffect(() => {
-    const handleMouseMove = (e: MouseEvent) => {
-      const x = (e.clientX / window.innerWidth) * 100;
-      const y = (e.clientY / window.innerHeight) * 100;
-      setMousePos({ x, y });
+    if (!interactive) {
+      setIsHovering(false);
+      return;
+    }
+
+    const flushPointerState = () => {
+      frameRef.current = null;
+      setMousePos(pendingMousePosRef.current);
       setIsHovering(true);
     };
 
+    const handleMouseMove = (e: MouseEvent) => {
+      pendingMousePosRef.current = {
+        x: (e.clientX / window.innerWidth) * 100,
+        y: (e.clientY / window.innerHeight) * 100,
+      };
+      if (frameRef.current === null) {
+        frameRef.current = window.requestAnimationFrame(flushPointerState);
+      }
+    };
+
     const handleMouseLeave = () => {
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
       setIsHovering(false);
     };
 
     const handleTouchMove = (e: TouchEvent) => {
       if (e.touches.length > 0) {
-        const x = (e.touches[0].clientX / window.innerWidth) * 100;
-        const y = (e.touches[0].clientY / window.innerHeight) * 100;
-        setMousePos({ x, y });
-        setIsHovering(true);
+        pendingMousePosRef.current = {
+          x: (e.touches[0].clientX / window.innerWidth) * 100,
+          y: (e.touches[0].clientY / window.innerHeight) * 100,
+        };
+        if (frameRef.current === null) {
+          frameRef.current = window.requestAnimationFrame(flushPointerState);
+        }
       }
     };
 
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseleave", handleMouseLeave);
-    window.addEventListener("touchmove", handleTouchMove);
+    window.addEventListener("touchmove", handleTouchMove, { passive: true });
 
     return () => {
+      if (frameRef.current !== null) {
+        window.cancelAnimationFrame(frameRef.current);
+        frameRef.current = null;
+      }
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseleave", handleMouseLeave);
       window.removeEventListener("touchmove", handleTouchMove);
     };
-  }, []);
+  }, [interactive]);
 
   return (
-    <div className="interactive-background" ref={backgroundRef}>
+    <div
+      className={`interactive-background ${
+        interactive ? "" : "interactive-background--static"
+      }`}
+    >
       <div className="fluid-vortex vortex-1" />
       <div className="fluid-vortex vortex-2" />
       <div className="fluid-vortex vortex-3" />

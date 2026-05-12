@@ -1,5 +1,6 @@
 import { m as macro } from "@kitware/vtk.js/macros2.js";
 import vtkPolyData from "@kitware/vtk.js/Common/DataModel/PolyData.js";
+import vtkDataArray from "@kitware/vtk.js/Common/Core/DataArray.js";
 import vtkXMLReader from "@kitware/vtk.js/IO/XML/XMLReader.js";
 
 const VTK_CELL_TYPE = {
@@ -55,16 +56,51 @@ function buildBoundaryPolys(cellConnectivity, offsets, types) {
       const key = [...face].sort((a, b) => a - b).join(",");
       const prev = faceMap.get(key);
       if (prev) prev.count += 1;
-      else faceMap.set(key, { face, count: 1 });
+      else faceMap.set(key, { face, count: 1, cellId });
     });
   }
 
   const packedPolys = [];
+  const ownerCellIds = [];
   faceMap.forEach((entry) => {
     if (entry.count !== 1) return;
-    triangulateFace(entry.face).forEach((tri) => packedPolys.push(3, tri[0], tri[1], tri[2]));
+    triangulateFace(entry.face).forEach((tri) => {
+      packedPolys.push(3, tri[0], tri[1], tri[2]);
+      ownerCellIds.push(entry.cellId);
+    });
   });
-  return new Uint32Array(packedPolys);
+  return {
+    polys: new Uint32Array(packedPolys),
+    ownerCellIds: new Uint32Array(ownerCellIds),
+  };
+}
+
+function remapCellDataToBoundaryFaces(polydata, ownerCellIds, numCells) {
+  if (!ownerCellIds?.length || !numCells) return;
+  const cellData = polydata.getCellData?.();
+  const arrays = cellData?.getArrays?.() ?? [];
+  arrays.forEach((arr) => {
+    const tuples = Number(arr?.getNumberOfTuples?.() ?? 0);
+    const comps = Number(arr?.getNumberOfComponents?.() ?? 1);
+    const src = arr?.getData?.();
+    const name = String(arr?.getName?.() ?? "").trim();
+    if (!name || !src || tuples !== numCells || comps < 1) return;
+    const Ctor = src.constructor;
+    const mapped = new Ctor(ownerCellIds.length * comps);
+    for (let i = 0; i < ownerCellIds.length; i += 1) {
+      const srcCell = Number(ownerCellIds[i] ?? 0);
+      for (let c = 0; c < comps; c += 1) {
+        mapped[i * comps + c] = src[srcCell * comps + c];
+      }
+    }
+    const mappedArray = vtkDataArray.newInstance({
+      name,
+      numberOfComponents: comps,
+      values: mapped,
+    });
+    cellData.removeArray?.(name);
+    cellData.addArray?.(mappedArray);
+  });
 }
 
 function vtkXMLUnstructuredGridReader(publicAPI, model) {
@@ -75,6 +111,7 @@ function vtkXMLUnstructuredGridReader(publicAPI, model) {
     for (let outputIndex = 0; outputIndex < pieces.length; outputIndex++) {
       const piece = pieces[outputIndex];
       const polydata = vtkPolyData.newInstance();
+      let ownerCellIds = null;
       const numPoints = Number(piece.getAttribute("NumberOfPoints") || "0");
       const numCells = Number(piece.getAttribute("NumberOfCells") || "0");
       if (numPoints > 0) {
@@ -120,8 +157,13 @@ function vtkXMLUnstructuredGridReader(publicAPI, model) {
           headerType,
           model.binaryBuffer
         ).values;
-        const boundaryPolys = buildBoundaryPolys(Array.from(connectivity), Array.from(offsets), Array.from(types));
-        polydata.getPolys().setData(boundaryPolys);
+        const boundary = buildBoundaryPolys(
+          Array.from(connectivity),
+          Array.from(offsets),
+          Array.from(types)
+        );
+        polydata.getPolys().setData(boundary.polys);
+        ownerCellIds = boundary.ownerCellIds;
       }
 
       vtkXMLReader.processFieldData(
@@ -142,6 +184,7 @@ function vtkXMLUnstructuredGridReader(publicAPI, model) {
         headerType,
         model.binaryBuffer
       );
+      remapCellDataToBoundaryFaces(polydata, ownerCellIds, numCells);
 
       model.output[outputIndex] = polydata;
     }

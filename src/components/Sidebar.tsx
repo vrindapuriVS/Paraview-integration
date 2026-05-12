@@ -1,57 +1,20 @@
-import { useState, useRef, useEffect } from "react";
+import { useState } from "react";
+import { useAppLayout, type AnalysisFlowStep } from "../context/AppLayoutContext";
 
 type SidebarProps = {
   onNewAnalysis: () => void;
 };
 
+const ANALYSIS_FLOW_ITEMS: Array<{ key: AnalysisFlowStep; label: string }> = [
+  { key: "geometry", label: "Geometry" },
+  { key: "cl", label: "CL Values" },
+  { key: "cd", label: "CD Values" },
+  { key: "residuals", label: "Residuals" },
+];
+
 export default function Sidebar({ onNewAnalysis }: SidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
-  const sidebarRef = useRef<HTMLDivElement>(null);
-
-  // Lock scrollbar position - prevent ANY automatic scrolling but keep scrollbar visible
-  useEffect(() => {
-    const contentWrapper = sidebarRef.current;
-    if (!contentWrapper) return;
-
-    // Set scroll to top immediately
-    contentWrapper.scrollTop = 0;
-
-    // Continuously lock scroll position to prevent movement
-    let rafId: number;
-    let lastScrollTop = 0;
-    let userInteractionTime = 0;
-    
-    const lockScroll = () => {
-      const now = Date.now();
-      const timeSinceInteraction = now - userInteractionTime;
-      
-      // Only lock if no recent user interaction
-      if (timeSinceInteraction > 100) {
-        if (contentWrapper.scrollTop !== 0) {
-          contentWrapper.scrollTop = 0;
-        }
-      }
-      rafId = requestAnimationFrame(lockScroll);
-    };
-    
-    // Track user interactions
-    const handleUserInteraction = () => {
-      userInteractionTime = Date.now();
-    };
-    
-    contentWrapper.addEventListener('mousedown', handleUserInteraction);
-    contentWrapper.addEventListener('wheel', handleUserInteraction, { passive: true });
-    contentWrapper.addEventListener('touchstart', handleUserInteraction, { passive: true });
-    
-    rafId = requestAnimationFrame(lockScroll);
-
-    return () => {
-      cancelAnimationFrame(rafId);
-      contentWrapper.removeEventListener('mousedown', handleUserInteraction);
-      contentWrapper.removeEventListener('wheel', handleUserInteraction);
-      contentWrapper.removeEventListener('touchstart', handleUserInteraction);
-    };
-  }, [collapsed]);
+  const { analysisFlow } = useAppLayout();
 
   const recentItems = [
     "Transonic Airfoil UQ",
@@ -84,7 +47,7 @@ export default function Sidebar({ onNewAnalysis }: SidebarProps) {
         <div className="collapse-glow"></div>
       </button>
 
-      <div ref={sidebarRef} className="sidebar-content-wrapper" style={{ minHeight: 'calc(100vh + 1px)' }}>
+      <div className="sidebar-content-wrapper" style={{ minHeight: 'calc(100vh + 1px)' }}>
 
         {!collapsed && (
           <>
@@ -100,38 +63,80 @@ export default function Sidebar({ onNewAnalysis }: SidebarProps) {
               </div>
             </div>
 
-            <button className="new-analysis-btn agentic-new-btn" onClick={onNewAnalysis}>
-              <span className="btn-icon">+</span>
-              <span className="btn-text">New Analysis</span>
-              <div className="btn-shimmer"></div>
-              <div className="btn-glow"></div>
-            </button>
+            {!analysisFlow && (
+              <button className="new-analysis-btn agentic-new-btn" onClick={onNewAnalysis}>
+                <span className="btn-icon">+</span>
+                <span className="btn-text">New Analysis</span>
+                <div className="btn-shimmer"></div>
+                <div className="btn-glow"></div>
+              </button>
+            )}
 
-            <div className="sidebar-section agentic-section">
-              <div className="sidebar-section-title agentic-title">RECENT</div>
-              <div className="sidebar-items">
-                {recentItems.map((item, i) => (
-                  <div key={i} className="sidebar-item agentic-item">
-                    <div className="item-indicator"></div>
-                    <span className="item-text">{item}</span>
-                    <div className="item-hover-glow"></div>
+            {analysisFlow ? (
+              <>
+                <div className="sidebar-section agentic-section sidebar-flow-section">
+                  <div className="sidebar-section-title agentic-title">FLOW</div>
+                  <p className="sidebar-flow-caption">
+                    Navigate between geometry and result views.
+                  </p>
+                  <div className="sidebar-items sidebar-flow-items">
+                    {ANALYSIS_FLOW_ITEMS.map((item) => {
+                      const active = analysisFlow.currentStep === item.key;
+                      return (
+                        <button
+                          key={item.key}
+                          type="button"
+                          className={`sidebar-item agentic-item sidebar-flow-item ${
+                            active ? "sidebar-flow-item--active" : ""
+                          }`}
+                          onClick={() => analysisFlow.onSelectStep(item.key)}
+                          aria-current={active ? "step" : undefined}
+                        >
+                          <div className="item-indicator"></div>
+                          <span className="item-text">{item.label}</span>
+                          <div className="item-hover-glow"></div>
+                        </button>
+                      );
+                    })}
                   </div>
-                ))}
-              </div>
-            </div>
+                </div>
 
-            <div className="sidebar-footer agentic-footer">
-              <div className="sidebar-divider-line"></div>
-              <div className="sidebar-link agentic-link">
-                <span>Documentation</span>
-              </div>
-              <div className="sidebar-link agentic-link">
-                <span>Settings</span>
-              </div>
-              <div className="sidebar-link agentic-link">
-                <span>Profile</span>
-              </div>
-            </div>
+                <div className="sidebar-footer agentic-footer">
+                  <div className="sidebar-divider-line"></div>
+                  <div className="sidebar-link agentic-link sidebar-flow-hint">
+                    <span>Use Exit in the top-right to return to the main page.</span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="sidebar-section agentic-section">
+                  <div className="sidebar-section-title agentic-title">RECENT</div>
+                  <div className="sidebar-items">
+                    {recentItems.map((item, i) => (
+                      <div key={i} className="sidebar-item agentic-item">
+                        <div className="item-indicator"></div>
+                        <span className="item-text">{item}</span>
+                        <div className="item-hover-glow"></div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="sidebar-footer agentic-footer">
+                  <div className="sidebar-divider-line"></div>
+                  <div className="sidebar-link agentic-link">
+                    <span>Documentation</span>
+                  </div>
+                  <div className="sidebar-link agentic-link">
+                    <span>Settings</span>
+                  </div>
+                  <div className="sidebar-link agentic-link">
+                    <span>Profile</span>
+                  </div>
+                </div>
+              </>
+            )}
           </>
         )}
       </div>
